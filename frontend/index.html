@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ChapterSmith</title>
+  <link rel="stylesheet" href="/src/styles.css" />
+</head>
+<body>
+  <header class="app-bar">
+    <div class="tab-bar" role="tablist" aria-label="Application views">
+      <button class="tab-btn active" data-tab="book" role="tab" aria-selected="true" aria-controls="tab-book">Book</button>
+      <button class="tab-btn" data-tab="repair" role="tab" aria-selected="false" aria-controls="tab-repair">Repair</button>
+      <button class="tab-btn" data-tab="history" role="tab" aria-selected="false" aria-controls="tab-history">History</button>
+    </div>
+    <button type="button" class="btn btn-quiet btn-sm" id="aboutBtn">About</button>
+  </header>
+
+  <main class="tab-content">
+    <div id="tab-book" class="tab-pane active" role="tabpanel">
+      <div id="bookEditor"></div>
+    </div>
+
+    <div id="tab-repair" class="tab-pane" role="tabpanel">
+      <section id="repairLauncher" class="repair" aria-label="Repair a file"></section>
+    </div>
+
+    <div id="tab-history" class="tab-pane" role="tabpanel">
+      <div class="page-head">
+        <h2>History</h2>
+        <p>Exports and repairs from this computer.</p>
+      </div>
+      <div id="historyList">
+        <div class="history-empty">No previous tasks</div>
+      </div>
+    </div>
+  </main>
+
+  <section class="log-card" id="logCard" aria-label="Activity log">
+    <div class="log-card-body" id="logBody">
+      <div class="log-card-head">
+        <span class="card-title">Activity log</span>
+        <button type="button" class="log-mode-btn" id="logModeBtn" title="Toggle between simple and full log">Simple</button>
+      </div>
+      <div class="log-view" id="logView" tabindex="0" aria-label="Operation log"></div>
+    </div>
+  </section>
+
+  <footer class="dock">
+    <div class="dock-player" id="playerDock"></div>
+    <button type="button" class="log-toggle" id="logToggle" aria-expanded="false" aria-controls="logBody">
+      <span class="chevron" aria-hidden="true"></span>
+      <span>Log</span>
+      <span class="log-line-count" id="logLineCount"></span>
+    </button>
+  </footer>
+
+  <div class="modal-overlay" id="logModal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="modalTitle">Task Log</h3>
+        <button type="button" class="btn btn-ghost btn-sm" id="modalClose">Close</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-log" id="modalLogContent"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="aboutModal" role="dialog" aria-modal="true" aria-labelledby="aboutTitle">
+    <div class="modal modal-narrow">
+      <div class="modal-header">
+        <h3 id="aboutTitle">About ChapterSmith</h3>
+        <button type="button" class="btn btn-ghost btn-sm" id="aboutClose">Close</button>
+      </div>
+      <div class="modal-body">
+        <p class="about-lead">Merge, edit and repair audiobooks on your own computer.</p>
+        <p class="about-legal" id="buildInfo"></p>
+        <p class="about-legal" id="legalNotice"></p>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

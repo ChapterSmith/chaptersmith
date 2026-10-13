@@ -1,0 +1,19 @@
+{
+  "name": "chaptersmith-gui",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:mock": "BOOK_UI_MOCK=1 vite",
+    "build": "vite build",
+    "test": "node --test src/book"
+  },
+  "dependencies": {
+    "@wailsio/runtime": "3.0.0-beta.28"
+  },
+  "devDependencies": {
+    "linkedom": "^0.18.13",
+    "vite": "^6.0.0"
+  }
+}

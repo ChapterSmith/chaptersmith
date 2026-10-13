@@ -1,0 +1,481 @@
+# Build, package and release ChapterSmith.
+#
+# Builds and smoke-tests main, pull requests, and manual runs; tags publish releases.
+#
+# Per platform: GUI + CLI installers with statically linked LGPL FFmpeg
+# (see README.md for source and rebuild instructions):
+#   macOS:   ChapterSmith-<v>-macos-<arch>.dmg, ChapterSmith-CLI-<v>-macos-<arch>.pkg
+#   Windows: ChapterSmith[-CLI]-<v>-windows-x64-setup.exe
+#   Linux:   ChapterSmith[-CLI]-<v>-linux-<arch>.AppImage
+# plus exact application/FFmpeg source archives, SHA256 and per-platform build records.
+
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Space-separated platforms to build (empty = all): linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  # Selects the build matrix so a manual run can target single platforms.
+  plan:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - id: matrix
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          entries=()
+          for suffix in ${PLATFORMS:-linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64}; do
+            case "$suffix" in
+              linux-amd64)   os='"ubuntu-22.04"';;
+              linux-arm64)   os='"ubuntu-22.04-arm"';;
+              darwin-amd64)  os='"macos-15-intel"';;
+              darwin-arm64)  os='"macos-latest"';;
+              windows-amd64) os='"windows-latest"';;
+              *) echo "unknown platform: $suffix" >&2; exit 1;;
+            esac
+            entries+=("{\"os\":$os,\"suffix\":\"$suffix\"}")
+          done
+          joined="$(IFS=,; echo "${entries[*]}")"
+          echo "matrix={\"include\":[$joined]}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        # Windows builds use the MSYS2 UCRT64 toolchain.
+        shell: ${{ matrix.suffix == 'windows-amd64' && 'msys2 {0}' || 'bash' }}
+
+    env:
+      # Releases ship without Developer ID or notarization credentials.
+      REQUIRE_SIGNING: 'false'
+      OUT_DIR: dist/packages
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Restore FFmpeg cache
+        id: ffmpeg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: vendor/ffmpeg
+          key: ffmpeg-static-source-v2-${{ matrix.suffix }}-${{ runner.environment }}-n8.0-${{ hashFiles('scripts/build-ffmpeg.sh', 'scripts/check-static-ffmpeg.sh', 'scripts/ffmpeg-pkg-config.sh', 'scripts/source-release.py') }}
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git curl ca-certificates python3 xz-utils \
+            nasm pkg-config zlib1g-dev file libgtk-3-dev libwebkit2gtk-4.1-dev
+          ARCH=$(uname -m)
+          sudo curl -fsSL -o /usr/local/bin/appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${ARCH}.AppImage"
+          sudo chmod +x /usr/local/bin/appimagetool
+          echo "APPIMAGE_EXTRACT_AND_RUN=1" >> "$GITHUB_ENV"
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install nasm pkg-config
+
+      - name: Setup MSYS2 (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          release: true
+          update: false
+          install: >-
+            make nasm diffutils git python
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-ntldd
+            mingw-w64-ucrt-x86_64-imagemagick
+          path-type: inherit
+
+      - name: Install NSIS (Windows)
+        if: runner.os == 'Windows'
+        # Not PowerShell: a stock Windows install refuses to run script files.
+        shell: msys2 {0}
+        run: |
+          if [[ ! -f '/c/Program Files (x86)/NSIS/makensis.exe' ]]; then
+            command -v choco >/dev/null || { echo 'NSIS is missing and Chocolatey is not installed' >&2; exit 1; }
+            choco install nsis -y --no-progress
+          fi
+
+      - name: Packaging regression checks (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          bash scripts/test-package-windows.sh
+          python3 scripts/test-source-release.py
+          python3 scripts/test-stage-licenses.py
+          bash scripts/test-static-ffmpeg.sh
+          bash scripts/test-book-audio-platform.sh
+          bash scripts/test-smoke-windows.sh
+          bash scripts/test-verify-deps.sh
+          bash scripts/test-collect-libs.sh
+          if [ "$RUNNER_OS" = "macOS" ]; then bash scripts/test-package-macos.sh; fi
+
+      - name: Packaging regression checks (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          bash scripts/test-package-windows.sh
+          python3 scripts/test-source-release.py
+          python3 scripts/test-stage-licenses.py
+          bash scripts/test-static-ffmpeg.sh
+          bash scripts/test-book-audio-platform.sh
+          bash scripts/test-smoke-windows.sh
+          bash scripts/test-verify-deps.sh
+          bash scripts/test-collect-libs.sh
+
+      - name: Build FFmpeg (Unix)
+        if: runner.os != 'Windows' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: ./scripts/build-ffmpeg.sh --prefix="$PWD/vendor/ffmpeg"
+
+      - name: Build FFmpeg (Windows)
+        if: runner.os == 'Windows' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: ./scripts/build-ffmpeg.sh --prefix="$PWD/vendor/ffmpeg"
+
+      - name: Save FFmpeg cache
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: vendor/ffmpeg
+          key: ${{ steps.ffmpeg-cache.outputs.cache-primary-key }}
+
+      - name: Set CGO environment (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          {
+            echo "CGO_ENABLED=1"
+            echo "CGO_CFLAGS=-I$PWD/vendor/ffmpeg/include"
+            echo "PKG_CONFIG_PATH=$PWD/vendor/ffmpeg/lib/pkgconfig"
+            echo "FFMPEG_PREFIX=$PWD/vendor/ffmpeg"
+            echo "PKG_CONFIG=$PWD/vendor/ffmpeg-tools/pkg-config"
+          } >> "$GITHUB_ENV"
+
+      - name: Set CGO environment (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          {
+            echo "CGO_ENABLED=1"
+            echo "MACOSX_DEPLOYMENT_TARGET=13.0"
+            echo "CGO_CFLAGS=-I$PWD/vendor/ffmpeg/include"
+            echo "PKG_CONFIG_PATH=$PWD/vendor/ffmpeg/lib/pkgconfig"
+            echo "FFMPEG_PREFIX=$PWD/vendor/ffmpeg"
+            echo "PKG_CONFIG=$PWD/vendor/ffmpeg-tools/pkg-config"
+          } >> "$GITHUB_ENV"
+
+      - name: Set CGO environment (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          # Mixed-mode paths (D:/...) so Windows-native Go and MinGW GCC both resolve them.
+          FFMPEG_PREFIX="$(cygpath -m "$PWD/vendor/ffmpeg")"
+          {
+            echo "CGO_ENABLED=1"
+            echo "CC=$(cygpath -m /ucrt64/bin/gcc.exe)"
+            echo "FFMPEG_PKG_CONFIG=$(cygpath -m /ucrt64/bin/pkg-config.exe)"
+            echo "PKG_CONFIG=$(cygpath -m "$PWD/vendor/ffmpeg-tools/pkg-config.exe")"
+            echo "FFMPEG_PREFIX=${FFMPEG_PREFIX}"
+            echo "CGO_CFLAGS=-I${FFMPEG_PREFIX}/include"
+            echo "PKG_CONFIG_PATH=${FFMPEG_PREFIX}/lib/pkgconfig"
+            echo "MAKENSIS=$(cygpath -u 'C:\Program Files (x86)\NSIS\makensis.exe')"
+          } >> "$GITHUB_ENV"
+
+      - name: Set version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = "tag" ]; then
+            V="$REF_NAME"
+            [[ "$V" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] || { echo "Invalid release version: $V" >&2; exit 1; }
+          else
+            V="v0.0.0-dev.$GITHUB_RUN_NUMBER"
+          fi
+          {
+            echo "VERSION=$V"
+            echo "BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo "GOFLAGS=-mod=readonly"
+          } >> "$GITHUB_ENV"
+
+      # Stage from the clean release commit before generating icons/resources.
+      - name: Stage exact rebuild sources (Unix)
+        if: runner.os != 'Windows'
+        env:
+          SOURCE_PLATFORM: ${{ matrix.suffix }}
+        run: bash scripts/stage-rebuild-sources.sh "$OUT_DIR"
+
+      - name: Stage exact rebuild sources (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        env:
+          SOURCE_PLATFORM: ${{ matrix.suffix }}
+        run: bash scripts/stage-rebuild-sources.sh "$OUT_DIR"
+
+      - name: Rebuild extracted sources (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          bash scripts/test-rebuild-sources.sh "$OUT_DIR/"*-sources.tar.gz
+          bash scripts/test-rebuild-sources.sh "$OUT_DIR/"*-sources.tar.gz --modified-ffmpeg
+
+      - name: Rebuild extracted sources (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          bash scripts/test-rebuild-sources.sh "$OUT_DIR/"*-sources.tar.gz
+          bash scripts/test-rebuild-sources.sh "$OUT_DIR/"*-sources.tar.gz --modified-ffmpeg
+
+      # ── Generate icons from logo.png ────────────────────────────────
+      - name: Generate macOS .icns
+        if: runner.os == 'macOS'
+        run: |
+          ICONSET=$(mktemp -d)/icon.iconset
+          mkdir -p "$ICONSET"
+          for s in 16 32 128 256 512; do
+            sips -z $s $s logo.png --out "$ICONSET/icon_${s}x${s}.png"
+            sips -z $((s*2)) $((s*2)) logo.png --out "$ICONSET/icon_${s}x${s}@2x.png"
+          done
+          mkdir -p build/darwin
+          iconutil -c icns "$ICONSET" -o build/darwin/icon.icns
+
+      - name: Generate Windows .ico
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          mkdir -p build/windows
+          magick logo.png -resize 256x256 -define icon:auto-resize=256,128,64,48,32,16 build/windows/icon.ico
+
+      - name: Compile Windows icon resources
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          windres build/windows/cli.rc -o cmd/chaptersmith/cli_windows_amd64.syso
+          windres build/windows/app.rc -o cmd/chaptersmith-gui/app_windows_amd64.syso
+
+      # ── Build CLI + GUI ─────────────────────────────────────────────
+      - name: Bundled audio capabilities (Unix)
+        if: runner.os != 'Windows'
+        run: bash scripts/test-book-audio.sh -count=1 ./internal/audio -run '^TestBundledAudioCapabilities$'
+
+      - name: Bundled audio capabilities (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: bash scripts/test-book-audio.sh -count=1 ./internal/audio -run '^TestBundledAudioCapabilities$'
+
+      - name: Build CLI
+        run: |
+          EXT=""
+          if [ "$RUNNER_OS" = "Windows" ]; then EXT=".exe"; fi
+          mkdir -p dist
+          go build -ldflags "-X main.version=$VERSION -X main.buildTime=$BUILD_TIME" \
+            -o "dist/chaptersmith${EXT}" ./cmd/chaptersmith
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm test
+          npm run build
+
+      - name: Build GUI
+        run: |
+          rm -rf cmd/chaptersmith-gui/embed
+          mkdir -p cmd/chaptersmith-gui/embed
+          cp -r frontend/dist/* cmd/chaptersmith-gui/embed/
+          EXT=""; EXTRA=""; TAGS=""
+          if [ "${{ runner.os }}" = "Windows" ]; then EXT=".exe"; EXTRA="-H windowsgui"; fi
+          if [ "$RUNNER_OS" = "Linux" ]; then TAGS="gtk3"; fi
+          if [ "$RUNNER_OS" = "macOS" ]; then EXTRA="-extldflags=-mmacosx-version-min=13.0"; fi
+          go build -tags "$TAGS" -ldflags "-X main.version=$VERSION -X main.buildTime=$BUILD_TIME $EXTRA" -o "dist/chaptersmith-gui${EXT}" ./cmd/chaptersmith-gui
+
+      - name: Regression tests (Unix)
+        if: runner.os != 'Windows'
+        run: make test
+
+      - name: Regression tests (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: make test
+
+      - name: Import macOS signing certificates
+        if: runner.os == 'macOS' && github.event_name != 'pull_request'
+        env:
+          MACOS_CERT_APP_P12: ${{ secrets.MACOS_CERT_APP_P12 }}
+          MACOS_CERT_INSTALLER_P12: ${{ secrets.MACOS_CERT_INSTALLER_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          if [ -z "$MACOS_CERT_APP_P12" ]; then
+            echo "::warning::macOS signing secrets not configured — packages will be unsigned"
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KC_PASS="$(openssl rand -hex 16)"
+          security create-keychain -p "$KC_PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KC_PASS" "$KEYCHAIN"
+          for value in "$MACOS_CERT_INSTALLER_P12" "$MACOS_CERT_PASSWORD" "$APPLE_API_KEY_P8" "$APPLE_API_KEY_ID" "$APPLE_API_ISSUER_ID"; do
+            if [ -z "$value" ]; then echo "::error::Incomplete macOS signing secrets"; exit 1; fi
+          done
+          for p12 in "$MACOS_CERT_APP_P12" "$MACOS_CERT_INSTALLER_P12"; do
+            echo "$p12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+            security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" \
+              -T /usr/bin/codesign -T /usr/bin/productsign -T /usr/bin/pkgbuild
+          done
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PASS" "$KEYCHAIN"
+          keychains=("$KEYCHAIN")
+          while IFS= read -r existing; do
+            existing="${existing#*\"}"
+            existing="${existing%\"*}"
+            if [ "$existing" != "$KEYCHAIN" ]; then keychains+=("$existing"); fi
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "${keychains[@]}"
+          APP_ID=$(security find-identity -v "$KEYCHAIN" | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1)
+          INST_ID=$(security find-identity -v "$KEYCHAIN" | sed -n 's/.*"\(Developer ID Installer:[^"]*\)".*/\1/p' | head -1)
+          if [ -z "$APP_ID" ] || [ -z "$INST_ID" ]; then
+            echo "::error::Developer ID Application and Installer identities are required"; exit 1
+          fi
+          printf '%s' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/AuthKey.p8"
+          {
+            echo "MACOS_SIGN_IDENTITY=$APP_ID"
+            echo "MACOS_INSTALLER_IDENTITY=$INST_ID"
+            echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8"
+            echo "APPLE_API_KEY_ID=$APPLE_API_KEY_ID"
+            echo "APPLE_API_ISSUER_ID=$APPLE_API_ISSUER_ID"
+          } >> "$GITHUB_ENV"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          ./scripts/package-macos.sh gui
+          ./scripts/package-macos.sh cli
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          ./scripts/package-linux.sh gui
+          ./scripts/package-linux.sh cli
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          ./scripts/package-windows.sh gui
+          ./scripts/package-windows.sh cli
+
+      - name: Smoke test (macOS)
+        if: runner.os == 'macOS'
+        run: ./scripts/smoke-macos.sh "$OUT_DIR"
+
+      - name: Smoke test (Linux)
+        if: runner.os == 'Linux'
+        run: ./scripts/smoke-linux.sh "$OUT_DIR"
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: ./scripts/smoke-windows.sh "$OUT_DIR"
+
+      - name: Cleanup macOS keychain
+        if: always() && runner.os == 'macOS'
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Stage FFmpeg build instructions
+        run: cp vendor/ffmpeg/share/BUILDING-FFMPEG.txt "$OUT_DIR/BUILDING-FFMPEG-${{ matrix.suffix }}.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.suffix }}
+          path: dist/packages/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: artifacts
+        run: sha256sum -- * > SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          body: |
+            ChapterSmith is a local audiobook editor for arranging audio, editing chapters, and exporting finished books.
+
+            - Desktop app and CLI for macOS, Windows, and Linux.
+            - Book editor with chapter organization, waveform previews, metadata, and cover editing.
+            - MP3, M4A, M4B, AAC, OGG, Opus, FLAC, and WAV input; playlist ordering and CUE chapters.
+            - Audio analysis, loudness normalization, and configurable export.
+            - Fix mode: re-encode an existing audiobook while retaining supported chapters, metadata, and cover art.
+            - Metadata, cover art, progress logs, and local task history.
+            - Free for personal and commercial use under the MIT License.
+
+            Choose the package matching your operating system and architecture.
+            Desktop packages start with `ChapterSmith-`; command-line packages start with `ChapterSmith-CLI-`.
+
+            **Signing:** macOS packages have no Apple Developer ID signature or notarization.
+            Windows installers are not code-signed. Your operating system may block or warn about them.
+            Download only from this release and verify the included `SHA256SUMS` file.
+            If you require signed software, wait for a signed release.
+
+            **Known limitation:** stream-copy joins may retain existing codec padding. Use a re-encoded export when seamless decoded-audio joins are needed.
+
+            FFmpeg is statically linked under LGPL 2.1 or later. Exact application and FFmpeg source archives, checksums, and rebuild instructions are attached.
+            See the README for installation, usage, build instructions, and dependency notices.
+          fail_on_unmatched_files: true

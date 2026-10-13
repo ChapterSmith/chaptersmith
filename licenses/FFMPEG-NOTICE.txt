@@ -1,0 +1,14 @@
+ChapterSmith uses libraries from the FFmpeg project (https://ffmpeg.org),
+licensed under the GNU Lesser General Public License version 2.1 or later
+(see LGPL-2.1.txt). FFmpeg is a trademark of Fabrice Bellard.
+
+FFmpeg is statically linked into the application. BUILDING-FFMPEG.txt records
+the selected source revision and configuration. System libraries may remain
+dynamically linked. ChapterSmith's original source is licensed under MIT;
+FFmpeg and other dependencies retain their own licenses.
+
+Each release includes corresponding application and FFmpeg source in
+ChapterSmith-VERSION-REVISION-PLATFORM-sources.tar.gz with an adjacent SHA256
+file. The archive includes pinned dependency manifests, build scripts and the
+exact FFmpeg source used for that platform. See README.md for extraction,
+dependency recovery and rebuilding the CLI and GUI with modified FFmpeg.

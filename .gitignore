@@ -1,0 +1,48 @@
+# Build artifacts
+dist/
+*.exe
+*.o
+*.a
+
+# FFmpeg vendor build & Go vendor
+vendor/
+!vendor/.gitkeep
+
+# Go
+*.test
+*.out
+coverage.txt
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/bindings/
+
+# IDE
+.idea/
+.vscode/
+.cursor/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Database
+*.db
+
+# Audio output (don't commit test outputs)
+*.m4b
+
+# Temp files
+*.tmp
+.worktrees/
+
+# GUI frontend embed (built by make build-gui, keep .gitkeep)
+cmd/chaptersmith-gui/embed/*
+!cmd/chaptersmith-gui/embed/.gitkeep
